@@ -25,7 +25,7 @@ import type { InputSubmitMode } from '../contract/composer-submission.ts'
 import type { PopupDismissFace } from './facade.ts'
 import { SessionInputShell } from './facade.ts'
 import { reportMessageSubmission } from './submission-analytics.ts'
-import { readConversationDraft } from '../stores.ts'
+import { clearConversationDraft, readConversationDraft, writeConversationDraft } from '../stores.ts'
 
 /** Structural command face for per-session popup resolution. */
 interface CommandFace {
@@ -167,7 +167,17 @@ export class InputHub implements SessionInputResolver {
         return () => { shell.refreshLexiconSubscription() }
       }, 'conversation.input: reference catalogs')
     })
-    shell.setDraft(readConversationDraft(binding.sessionId))
+    // A blank Session shares one draft slot, so text typed before the first message
+    // survives the session-id churn of repeated new-conversation entries.
+    const snapshot = binding.session.getSnapshot()
+    const draftSessionId = snapshot.blank ? null : binding.sessionId
+    shell.setDraft(readConversationDraft(draftSessionId))
+    if (snapshot.blank) {
+      const unwatch = shell.state.subscribe(() => {
+        writeConversationDraft(null, shell.draftSnapshot)
+      })
+      actx.effect(() => unwatch, 'conversation.input: persist blank draft')
+    }
     return shell
   }
 
@@ -230,7 +240,7 @@ export class InputHub implements SessionInputResolver {
    * exactly one path; a failed first prompt is an ordinary prompt failure
    * (banner via promptError, draft restored only while untouched).
    */
-  private sink(
+  private async sink(
     session: SessionFace,
     text: string,
     attachmentIds: readonly DraftAttachmentId[],
@@ -238,7 +248,18 @@ export class InputHub implements SessionInputResolver {
     signal: AbortSignal,
   ): Promise<SubmitOutcome> {
     if (text === '' && attachmentIds.length === 0) return Promise.resolve({ kind: 'success' })
-    return this.conversation().sendSession(session, text, attachmentIds, mode, signal)
+
+    // A blank Session keeps its text in the shared slot; remember that so a successful
+    // first send can retire the slot instead of leaking it into the next new conversation.
+    const wasBlank = session.getSnapshot().blank
+
+    const outcome = await this.conversation().sendSession(session, text, attachmentIds, mode, signal)
+
+    if (wasBlank && outcome.kind === 'success') {
+      clearConversationDraft(null)
+      clearConversationDraft(session.getSnapshot().sessionId)
+    }
+    return outcome
   }
 
   /**

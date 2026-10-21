@@ -2,7 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { DraftSnapshot } from '../src/client/contract/draft-editor.ts'
-import { createConversationStore, readConversationDraft, readConversationViewPreference } from '../src/client/stores.ts'
+import {
+  clearConversationDraft, createConversationStore, readConversationDraft, readConversationViewPreference,
+  writeConversationDraft,
+} from '../src/client/stores.ts'
 
 const KEY = 'dsh.conversation'
 
@@ -160,5 +163,73 @@ describe('createConversationStore', () => {
       expect(readConversationViewPreference(sessionId)).toBeNull()
       expect(read.mock.calls).toEqual([[`${KEY}.${sessionId}`], [`${KEY}.${sessionId}`]])
     } finally { read.mockRestore() }
+  })
+})
+
+describe('shared new-conversation draft slot', () => {
+  it('reads and writes the shared slot for a null Session id', () => {
+    const draft: DraftSnapshot = { text: 'unsent', references: [] }
+    writeConversationDraft(null, draft)
+    expect(JSON.parse(localStorage.getItem(`${KEY}.__pending__`)!)).toEqual({ draft })
+    expect(readConversationDraft(null)).toEqual(draft)
+  })
+
+  it('keeps the shared slot independent of every Session slot', () => {
+    const sessionId = 'sess-1' as SessionId
+    writeConversationDraft(null, { text: 'shared', references: [] })
+    writeConversationDraft(sessionId, { text: 'owned', references: [] })
+
+    expect(readConversationDraft(null)).toEqual({ text: 'shared', references: [] })
+    expect(readConversationDraft(sessionId)).toEqual({ text: 'owned', references: [] })
+    expect(localStorage.getItem(`${KEY}.__pending__`)).not.toBeNull()
+    expect(localStorage.getItem(`${KEY}.${sessionId}`)).not.toBeNull()
+  })
+
+  it('drops the shared slot and one Session slot on demand', () => {
+    const sessionId = 'sess-1' as SessionId
+    writeConversationDraft(null, { text: 'shared', references: [] })
+    writeConversationDraft(sessionId, { text: 'owned', references: [] })
+
+    clearConversationDraft(null)
+    expect(localStorage.getItem(`${KEY}.__pending__`)).toBeNull()
+    expect(readConversationDraft(null)).toEqual({ text: '', references: [] })
+
+    clearConversationDraft(sessionId)
+    expect(localStorage.getItem(`${KEY}.${sessionId}`)).toBeNull()
+    expect(readConversationDraft(sessionId)).toEqual({ text: '', references: [] })
+  })
+
+  it('leaves the store untouched when clearing a slot that was never written', () => {
+    expect(() => {
+      clearConversationDraft(null)
+      clearConversationDraft('absent' as SessionId)
+    }).not.toThrow()
+    expect(localStorage.getItem(`${KEY}.__pending__`)).toBeNull()
+  })
+
+  it('tolerates absent browser storage', () => {
+    vi.stubGlobal('localStorage', undefined)
+    try {
+      expect(readConversationDraft(null)).toEqual({ text: '', references: [] })
+      expect(() => {
+        writeConversationDraft(null, { text: 'x', references: [] })
+        clearConversationDraft(null)
+      }).not.toThrow()
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('tolerates browser storage that denies writes', () => {
+    const denied = () => { throw new DOMException('Storage access denied', 'SecurityError') }
+    const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(denied)
+    const remove = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(denied)
+    try {
+      expect(() => {
+        writeConversationDraft(null, { text: 'x', references: [] })
+        clearConversationDraft(null)
+      }).not.toThrow()
+    } finally {
+      write.mockRestore()
+      remove.mockRestore()
+    }
   })
 })

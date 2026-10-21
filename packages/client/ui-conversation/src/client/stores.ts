@@ -6,6 +6,8 @@ import type { DraftInput, DraftSnapshot } from './contract/draft-editor.ts'
 import { parseStoredDraft } from './draft.ts'
 
 const CONVERSATION_STORE_KEY = 'dsh.conversation'
+/** Shared draft slot for conversations that have not sent a first message yet. */
+const DRAFT_NEW_KEY = '__pending__'
 
 /** Declared write set for the Conversation shell. */
 type ConversationActions = {
@@ -36,15 +38,26 @@ export function createConversationStore(): EngineStoreHandle<ConversationStoreSt
 }
 
 /**
+ * Storage key of one conversation draft; null addresses the shared slot.
+ * @param sessionId - Session ID, or null for the new-conversation slot.
+ * @returns the localStorage key.
+ */
+function draftStorageKey(sessionId: SessionId | null): string {
+  return sessionId === null
+    ? `${CONVERSATION_STORE_KEY}.${DRAFT_NEW_KEY}`
+    : `${CONVERSATION_STORE_KEY}.${sessionId}`
+}
+
+/**
  * Read a Session's draft before its input source is published to React.
- * @param sessionId - Session-scoped persistence suffix.
+ * @param sessionId - Session ID for existing conversations, or null for new unsaved conversations.
  * @returns saved semantic content, or an empty document when storage is absent or invalid.
  */
-export function readConversationDraft(sessionId: SessionId): DraftSnapshot {
+export function readConversationDraft(sessionId: SessionId | null): DraftSnapshot {
   const empty: DraftSnapshot = { text: '', references: [] }
   if (typeof localStorage === 'undefined') return empty
   try {
-    const raw = localStorage.getItem(`${CONVERSATION_STORE_KEY}.${sessionId}`)
+    const raw = localStorage.getItem(draftStorageKey(sessionId))
     if (raw === null) return empty
     const stored: unknown = JSON.parse(raw)
     if (typeof stored !== 'object' || stored === null || !('draft' in stored)) return empty
@@ -52,6 +65,37 @@ export function readConversationDraft(sessionId: SessionId): DraftSnapshot {
   } catch (_error: unknown) {
     // Unavailable browser storage or malformed JSON has no usable saved draft.
     return empty
+  }
+}
+
+/**
+ * Write a draft to localStorage.
+ * @param sessionId - Session ID for existing conversations, or null for the shared
+ *   new-conversation slot.
+ * @param draft - The draft snapshot to save.
+ */
+export function writeConversationDraft(sessionId: SessionId | null, draft: DraftSnapshot): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(draftStorageKey(sessionId), JSON.stringify({ draft }))
+  } catch (_error: unknown) {
+    // Silently fail if localStorage is unavailable
+  }
+}
+
+/**
+ * Drop a saved draft. A blank Session owns no draft of its own, so its first
+ * accepted message retires both that Session's slot and the shared one —
+ * otherwise the next new conversation would resurrect the sent text.
+ * @param sessionId - Session ID for existing conversations, or null for the shared
+ *   new-conversation slot.
+ */
+export function clearConversationDraft(sessionId: SessionId | null): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.removeItem(draftStorageKey(sessionId))
+  } catch (_error: unknown) {
+    // Silently fail if localStorage is unavailable
   }
 }
 
